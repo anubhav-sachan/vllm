@@ -1180,10 +1180,16 @@ def _get_kv_cache_groups_glm5_next(
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, KpoolTailSpec)
     }
+    sliding_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if type(spec) is SlidingWindowSpec
+    }
     attn_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
         if not isinstance(spec, (MambaSpec, KpoolTailSpec))
+        and name not in sliding_specs
     }
     if not mamba_specs or not all(
         type(spec) is MLAAttentionSpec for spec in attn_specs.values()
@@ -1203,6 +1209,8 @@ def _get_kv_cache_groups_glm5_next(
     mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
     assert len(mla_pages) == 1
     mla_page = mla_pages.pop()
+    if any(spec.page_size_bytes > mla_page for spec in sliding_specs.values()):
+        return None
     uniform_spec = UniformTypeKVCacheSpecs.from_specs(attn_specs)
     assert uniform_spec is not None
 
@@ -1240,10 +1248,31 @@ def _get_kv_cache_groups_glm5_next(
     for index, name in enumerate(mamba_specs):
         mamba_grouped_names[index % num_groups].append(name)
 
+    # External sliding-window drafts can use the same physical slot shape as
+    # the target's Mamba groups, with independent logical block tables.
+    sliding_buckets: dict[SlidingWindowSpec, list[str]] = defaultdict(list)
+    for name, spec in sliding_specs.items():
+        # A tiny draft block padded to an MLA page wastes most of the pool.
+        # Match the target's logical span before padding the physical page.
+        spec = replace(spec, block_size=mla_specs[mla_names[0]].block_size)
+        if spec.page_size_bytes > mla_page:
+            return None
+        sliding_buckets[replace(spec, page_size_padded=mla_page)].append(name)
+    sliding_groups: list[KVCacheGroupSpec] = []
+    spec_config = vllm_config.speculative_config
+    drop_draft_block = spec_config is not None and spec_config.use_eagle_block_drop()
+    for spec, names in sliding_buckets.items():
+        count = cdiv(len(names), len(mla_names))
+        sliding_groups.extend(
+            KVCacheGroupSpec(names[i::count], spec, is_eagle_group=drop_draft_block)
+            for i in range(count)
+        )
+
     return (
         [KVCacheGroupSpec(list(attn_specs), uniform_spec)]
         + ([tail_group] if tail_group is not None else [])
         + create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
+        + sliding_groups
     )
 
 
@@ -1268,8 +1297,11 @@ def _glm5_next_tensor_layout(
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     ]
-    mamba_groups = [
-        group for group in kv_cache_groups if isinstance(group.kv_cache_spec, MambaSpec)
+    slot_groups = [
+        group
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, MambaSpec)
+        or type(group.kv_cache_spec) is SlidingWindowSpec
     ]
     attn_group: KVCacheGroupSpec | None = None
     tail_group: KVCacheGroupSpec | None = None
@@ -1279,9 +1311,11 @@ def _glm5_next_tensor_layout(
             attn_group = group
         elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
             tail_group = group
-    if attn_group is None or not mamba_groups:
+    if attn_group is None or not any(
+        isinstance(group.kv_cache_spec, MambaSpec) for group in slot_groups
+    ):
         return None
-    if len(uniform_groups) + len(mamba_groups) != len(kv_cache_groups):
+    if len(uniform_groups) + len(slot_groups) != len(kv_cache_groups):
         return None
 
     attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
@@ -1303,7 +1337,11 @@ def _glm5_next_tensor_layout(
         return None
     mla_page = mla_pages.pop()
     idx_page = idx_pages.pop()
-    if any(group.kv_cache_spec.page_size_bytes != mla_page for group in mamba_groups):
+    if any(
+        group.kv_cache_spec.page_size_bytes != mla_page
+        or len(group.layer_names) > len(mla_names)
+        for group in slot_groups
+    ):
         return None
 
     tail_names: list[str] = []
@@ -1325,7 +1363,7 @@ def _glm5_next_tensor_layout(
 
     return (
         attn_group,
-        mamba_groups,
+        slot_groups,
         mla_names,
         idx_names,
         mla_page,
@@ -1642,7 +1680,7 @@ def get_kv_cache_config_from_groups(
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
             attn_group,
-            mamba_groups,
+            slot_groups,
             mla_names,
             idx_names,
             mla_page,
@@ -1675,7 +1713,7 @@ def get_kv_cache_config_from_groups(
         for index, mla_name in enumerate(mla_names):
             offset = index * mla_page * num_blocks
             add_tensor(mla_name, attn_specs[mla_name], offset)
-            for group in mamba_groups:
+            for group in slot_groups:
                 if index < len(group.layer_names):
                     add_tensor(group.layer_names[index], group.kv_cache_spec, offset)
 
@@ -2341,7 +2379,7 @@ def _max_memory_usage_bytes_from_groups(
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
             attn_group,
-            mamba_groups,
+            slot_groups,
             mla_names,
             idx_names,
             mla_page,
@@ -2356,7 +2394,7 @@ def _max_memory_usage_bytes_from_groups(
                 group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
                 group.kv_cache_spec.page_size_bytes,
             )
-            for group in mamba_groups
+            for group in slot_groups
         )
         if tail_names:
             total_blocks += 1
