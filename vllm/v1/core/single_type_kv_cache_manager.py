@@ -179,16 +179,17 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
-            apply_admission_cap: If True, clamp by `num_required_blocks` by
-                `_max_admission_blocks_per_request`for recycling-aware specs
-                (SWA, chunked-local).
+            apply_admission_cap: Retained for call-site compatibility. Managers
+                for recycling-aware specs (SWA, chunked-local) always clamp
+                `num_required_blocks` by `_max_admission_blocks_per_request` so
+                both admission and running-request allocation stay window-bounded.
 
         Returns:
             The number of blocks to allocate.
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap and self._max_admission_blocks_per_request is not None:
+        if self._max_admission_blocks_per_request is not None:
             # Recycling-aware specs (SWA, chunked-local) cap the per-request
             # reservation here so admission matches the startup pool sizer
             # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
@@ -371,6 +372,14 @@ class SingleTypeKVCacheManager(ABC):
 
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
+        if self._max_admission_blocks_per_request is not None:
+            # Recycling-aware managers must use the same bounded requirement
+            # during execution as during admission. Otherwise a long prefill
+            # can re-allocate the full sequence after remove_skipped_blocks()
+            # and exhaust the shared pool (vLLM #55800).
+            num_required_blocks = min(
+                num_required_blocks, self._max_admission_blocks_per_request
+            )
         num_new_blocks = num_required_blocks - len(req_blocks)
         if num_new_blocks <= 0:
             return cow_blocks

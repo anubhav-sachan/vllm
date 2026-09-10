@@ -227,3 +227,33 @@ def test_is_reasoning_end_full_prompt(
     token_ids = glm45_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)
     assert check_is_reasoning_end == is_reasoning_end
+
+
+@pytest.mark.parametrize("control", ["thinking", "enable_thinking"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_unsupported_false_thinking_control_does_not_leak_reasoning(
+    control: str,
+    streaming: bool,
+    glm45_tokenizer,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        glm45_tokenizer,
+        "chat_template",
+        "{{ messages }}",  # GLM-5.3-style template with no thinking toggle.
+    )
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer,
+        chat_template_kwargs={control: False},
+    )
+    output = glm45_tokenizer.tokenize(WITHOUT_OPEN_THINK["output"])
+    output_tokens = [
+        glm45_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+
+    reasoning, content = run_reasoning_extraction(
+        parser, output_tokens, streaming=streaming
+    )
+
+    assert reasoning == WITHOUT_OPEN_THINK["reasoning"]
+    assert content == WITHOUT_OPEN_THINK["content"]

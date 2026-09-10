@@ -188,18 +188,23 @@ class Glm47MoeParser(ParserEngine):
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
         template = getattr(tokenizer, "chat_template", None)
-        if (
-            enable_thinking is False
-            and isinstance(template, str)
-            and "enable_thinking" not in template
-        ):
-            logger.warning_once(
-                "Ignoring chat_template_kwargs 'enable_thinking': the model's "
-                "chat template does not declare it, so reasoning is always "
-                "enabled and the flag would leak reasoning into the content. "
-                "Use 'reasoning_effort' to control the thinking budget."
-            )
-            enable_thinking = None
+        if isinstance(template, str):
+            ignored_controls: list[str] = []
+            if enable_thinking is False and "enable_thinking" not in template:
+                enable_thinking = None
+                ignored_controls.append("enable_thinking")
+            if thinking is False and re.search(r"\bthinking\b", template) is None:
+                thinking = None
+                ignored_controls.append("thinking")
+            if ignored_controls:
+                logger.warning_once(
+                    "Ignoring unsupported false chat-template control(s) %s: "
+                    "the model's template does not declare them, so reasoning "
+                    "is always enabled and disabling parser extraction would "
+                    "leak reasoning into content. Use 'reasoning_effort' to "
+                    "control the thinking budget.",
+                    ", ".join(ignored_controls),
+                )
         self.thinking_enabled = (
             True
             if thinking is None and enable_thinking is None

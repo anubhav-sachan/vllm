@@ -856,4 +856,5 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"num_tokens={num_tokens}: predictor returned {predicted} "
             f"but allocator pulled {len(new_blocks)}"
         )
+        assert len(manager.req_to_blocks[request_id]) <= cap
         total_computed = num_tokens
