@@ -30,6 +30,7 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
@@ -179,6 +180,22 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
         self.engine_client.check_admission(n)
+
+    def _verify_params_before_stream(self, params: SamplingParams) -> None:
+        """Validate sampling params before a streaming response is started.
+
+        The engine validates them in `generate()`, which a streaming response
+        only runs after the 200 status is sent, so an invalid request (for
+        example a JSON schema the structured output backend rejects) would
+        reach the client as an error event instead of an HTTP 400.
+        """
+        input_processor = self.input_processor
+        params.verify(
+            input_processor.model_config,
+            input_processor.speculative_config,
+            input_processor.structured_outputs_config,
+            input_processor.tokenizer,
+        )
 
     def create_streaming_error_response(
         self,

@@ -367,6 +367,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if request.stream:
+                    self._verify_params_before_stream(sampling_params)
 
             self._log_inputs(
                 sub_request_id,

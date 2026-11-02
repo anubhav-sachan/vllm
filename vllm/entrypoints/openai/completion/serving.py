@@ -179,6 +179,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if request.stream:
+                    self._verify_params_before_stream(sampling_params)
 
             request_id_item = f"{request_id}-{i}"
 

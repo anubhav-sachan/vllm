@@ -161,6 +161,36 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
         )
 
 
+INVALID_STRUCTURED_OUTPUTS = {
+    "json": {"type": "object", "properties": {"foo": "bar"}},
+    "regex": r"[.*",
+    "grammar": "root ::= select_statementinvalidsyntax",
+    "empty_grammar": "",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", list(INVALID_STRUCTURED_OUTPUTS))
+async def test_invalid_structured_outputs_stream_returns_400(
+    client: openai.AsyncOpenAI, kind: str
+) -> None:
+    """A streaming request with an invalid constraint is rejected with HTTP 400
+    before the stream opens, like the non-streaming request, instead of a 200
+    followed by an error event."""
+    key = "grammar" if kind == "empty_grammar" else kind
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        stream = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Say hello"}],
+            max_completion_tokens=5,
+            stream=True,
+            extra_body={"structured_outputs": {key: INVALID_STRUCTURED_OUTPUTS[kind]}},
+        )
+        async for _ in stream:
+            pass
+    assert exc_info.value.status_code == 400
+
+
 # Decode-side token reuse for disaggregated serving. The router forwards the
 # prefill stage's prompt token ids in kv_transfer_params so the decode stage
 # skips re-tokenizing.

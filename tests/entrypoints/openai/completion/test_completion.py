@@ -783,6 +783,34 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
         )
 
 
+INVALID_STRUCTURED_OUTPUTS = {
+    "json": {"type": "object", "properties": {"foo": "bar"}},
+    "regex": r"[.*",
+    "grammar": "root ::= select_statementinvalidsyntax",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", list(INVALID_STRUCTURED_OUTPUTS))
+async def test_invalid_structured_outputs_stream_returns_400(
+    client: openai.AsyncOpenAI, kind: str
+) -> None:
+    """A streaming request with an invalid constraint is rejected with HTTP 400
+    before the stream opens, like the non-streaming request, instead of a 200
+    followed by an error event."""
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        stream = await client.completions.create(
+            model=MODEL_NAME,
+            prompt="Say hello",
+            max_tokens=5,
+            stream=True,
+            extra_body={"structured_outputs": {kind: INVALID_STRUCTURED_OUTPUTS[kind]}},
+        )
+        async for _ in stream:
+            pass
+    assert exc_info.value.status_code == 400
+
+
 # Unit tests for bad_words in CompletionRequest.to_sampling_params()
 def test_completion_request_bad_words_to_sampling_params():
     """bad_words should be forwarded to SamplingParams (parity with chat)."""
